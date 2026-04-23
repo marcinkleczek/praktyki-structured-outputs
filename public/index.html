@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <title>LLM → JSON → SQL (SQLite vs MySQL)</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 0; background: #f5f5f7; color: #1d1d1f; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    .sub { color: #6e6e73; margin-bottom: 20px; }
+    .card { background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.06); margin-bottom: 16px; }
+    .card h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: #6e6e73; }
+    textarea { width: 100%; min-height: 70px; font: inherit; padding: 10px; border: 1px solid #d2d2d7; border-radius: 8px; resize: vertical; }
+    button { background: #0071e3; color: #fff; border: 0; padding: 10px 20px; border-radius: 8px; font-weight: 600; cursor: pointer; margin-top: 8px; }
+    button:disabled { opacity: .5; cursor: wait; }
+    pre { margin: 0; padding: 12px; background: #1d1d1f; color: #f5f5f7; border-radius: 8px; overflow-x: auto; font: 13px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+    .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .col h2 { display: flex; justify-content: space-between; align-items: center; }
+    .badge { font-size: 11px; background: #e8e8ed; color: #1d1d1f; padding: 2px 8px; border-radius: 999px; }
+    .mysql .badge { background: #00758f; color: #fff; }
+    .sqlite .badge { background: #0f80cc; color: #fff; }
+    .bindings { margin-top: 8px; font-size: 12px; color: #6e6e73; }
+    .err { color: #b3261e; white-space: pre-wrap; }
+    .hint { color: #6e6e73; font-size: 12px; margin-top: 6px; }
+    .examples { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .examples button { background: #e8e8ed; color: #1d1d1f; padding: 6px 10px; font-size: 12px; font-weight: 500; margin: 0; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>LLM → JSON → SQL</h1>
+  <div class="sub">Model zwraca <strong>ustrukturyzowaną intencję</strong> (JSON). Biblioteka (Knex) buduje SQL osobno dla SQLite i MySQL.</div>
+
+  <div class="card">
+    <h2>1. Twoje zapytanie (język naturalny)</h2>
+    <textarea id="prompt" placeholder="np. utwórz tabelę klienci z kolumnami id, imię, nazwisko, email (unikalny) i data rejestracji">utwórz tabelę piłkarze z imionami nazwiskami wiekiem i klubem przynależności</textarea>
+    <div class="examples">
+      <button data-ex="utwórz tabelę klienci z kolumnami: id (klucz główny, auto), imię, nazwisko, email (unikalny, 200 znaków) oraz data rejestracji">przykład: CREATE</button>
+      <button data-ex="wybierz 5 najdroższych produktów z kategorii 'elektronika', posortuj malejąco po cenie">przykład: SELECT</button>
+      <button data-ex="dodaj do tabeli klienci wiersz: imię Łukasz, nazwisko Żółć, email l.zolc@example.pl">przykład: INSERT</button>
+      <button data-ex="zaktualizuj w tabeli produkty cenę na 99.90 gdzie id = 42">przykład: UPDATE</button>
+    </div>
+    <div>
+      <button id="send">Wyślij do modelu</button>
+    </div>
+    <div class="hint">Model NIE generuje SQL — tylko JSON opisujący intencję. SQL powstaje lokalnie w builderze.</div>
+  </div>
+
+  <div class="card">
+    <h2>2a. Surowa odpowiedź modelu <span id="meta" class="badge" style="background:#e8e8ed;color:#1d1d1f"></span></h2>
+    <pre id="raw">—</pre>
+  </div>
+
+  <div class="card">
+    <h2>2b. Po sparsowaniu JSON → intencja</h2>
+    <pre id="json">—</pre>
+  </div>
+
+  <div class="cols">
+    <div class="card col sqlite">
+      <h2>3a. SQLite <span class="badge">sqlite3</span></h2>
+      <pre id="sqlite">—</pre>
+      <div class="bindings" id="sqlite-b"></div>
+    </div>
+    <div class="card col mysql">
+      <h2>3b. MySQL <span class="badge">mysql2 · utf8mb4</span></h2>
+      <pre id="mysql">—</pre>
+      <div class="bindings" id="mysql-b"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const btn = $('send');
+
+document.querySelectorAll('[data-ex]').forEach(b => {
+  b.addEventListener('click', () => { $('prompt').value = b.dataset.ex; });
+});
+
+async function send() {
+  const prompt = $('prompt').value.trim();
+  if (!prompt) return;
+  btn.disabled = true;
+  $('raw').textContent = 'czekam na model...';
+  $('json').textContent = '—';
+  $('meta').textContent = '';
+  $('sqlite').textContent = '—';
+  $('mysql').textContent = '—';
+  $('sqlite-b').textContent = '';
+  $('mysql-b').textContent = '';
+  try {
+    const r = await fetch('/api/build', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Błąd');
+
+    $('raw').textContent = data.raw;
+    $('json').textContent = JSON.stringify(data.intent, null, 2);
+    if (data.model) {
+      const u = data.usage || {};
+      $('meta').textContent = `${data.model} · ${u.prompt_tokens||'?'}→${u.completion_tokens||'?'} tok`;
+    }
+    $('sqlite').textContent = data.sqlite.sql + ';';
+    $('mysql').textContent  = data.mysql.sql  + ';';
+    if (data.sqlite.bindings?.length) $('sqlite-b').textContent = 'bindings: ' + JSON.stringify(data.sqlite.bindings);
+    if (data.mysql.bindings?.length)  $('mysql-b').textContent  = 'bindings: ' + JSON.stringify(data.mysql.bindings);
+  } catch (e) {
+    $('raw').innerHTML = '<span class="err">' + e.message + '</span>';
+    $('json').textContent = '—';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+btn.addEventListener('click', send);
+$('prompt').addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') send();
+});
+</script>
+</body>
+</html>
